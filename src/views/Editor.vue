@@ -1,0 +1,504 @@
+<script setup>
+import { computed, onBeforeUnmount, reactive, ref, watch } from 'vue'
+import { brand } from '../config/brand.js'
+import { CANVAS_WIDTH } from '../config/canvas.js'
+import { jewelryArchive, jewelryCategories } from '../data/jewelry.js'
+import { PLACEMENT_REGIONS, PLACEMENT_STATUS, PLACEMENT_STATUS_LABEL, createPlacementPoint, isPlanned, mirrorPointsAcross } from '../data/placement.js'
+import WindowChrome from '../components/common/WindowChrome.vue'
+import EarCanvas from '../components/editor/EarCanvas.vue'
+import demoEarSource from '../assets/images/test-ear-sharp.png'
+
+const earSide = ref('right')
+const earSource = ref(demoEarSource)
+const earInput = ref(null)
+const hasCustomEar = ref(false)
+const earUploadError = ref('')
+const editorMode = ref('stack')
+const activeCategory = ref('ALL')
+const selectedId = ref('piece-001')
+const sequence = ref(1)
+const placementPoints = ref([])
+const placementSequence = ref(0)
+const selectedPlacementId = ref(null)
+const newPlacementStatus = ref(PLACEMENT_STATUS.EXISTING)
+const newPlacementRegion = ref(PLACEMENT_REGIONS[0])
+const snapEnabled = ref(true)
+const brushMode = ref('hide')
+const brushSize = ref(28)
+let uploadedEarUrl = null
+
+const earTransform = reactive({ x: 0, y: 0, scale: 1, rotation: 0 })
+const firstJewelry = jewelryArchive[0]
+const pieces = ref([
+  {
+    id: 'piece-001',
+    catalogId: firstJewelry.id,
+    source: firstJewelry.source,
+    nameZh: firstJewelry.zh,
+    nameEn: firstJewelry.en,
+    x: 445,
+    y: 650,
+    scale: firstJewelry.scale,
+    rotation: 0,
+    zIndex: 1,
+    type: firstJewelry.type,
+    size: firstJewelry.size,
+    mask: { strokes: [] },
+  },
+])
+
+const selectedPiece = computed(() => pieces.value.find((piece) => piece.id === selectedId.value))
+const selectedIndex = computed(() => pieces.value.findIndex((piece) => piece.id === selectedId.value))
+const selectedPlacement = computed(() => placementPoints.value.find((point) => point.id === selectedPlacementId.value))
+const filteredJewelry = computed(() => activeCategory.value === 'ALL'
+  ? jewelryArchive
+  : jewelryArchive.filter((item) => item.type === activeCategory.value))
+const currentMaskCount = computed(() => selectedPiece.value?.mask?.strokes?.length || 0)
+const modeStatus = computed(() => {
+  if (editorMode.value === 'ear') return '正在调整耳朵 / ADJUST EAR'
+  if (editorMode.value === 'piercings') return '正在标记耳洞 / MARK PIERCINGS'
+  if (editorMode.value === 'occlusion') return `${brushMode.value === 'hide' ? '隐藏' : '恢复'}遮挡 / OCCLUSION`
+  return '拖动 · 缩放 · 旋转'
+})
+
+function normalizeZIndexes() {
+  pieces.value.forEach((piece, index) => { piece.zIndex = index + 1 })
+}
+
+function updatePiece(id, patch) {
+  const piece = pieces.value.find((entry) => entry.id === id)
+  if (piece) Object.assign(piece, patch)
+}
+
+function updateEar(patch) {
+  const before = { ...earTransform }
+  const next = {
+    x: 'x' in patch ? patch.x : before.x,
+    y: 'y' in patch ? patch.y : before.y,
+    scale: 'scale' in patch ? Math.max(0.45, Math.min(3.5, patch.scale)) : before.scale,
+    rotation: 'rotation' in patch ? Math.max(-15, Math.min(15, patch.rotation)) : before.rotation,
+  }
+
+  // 耳洞标记跟着耳朵照片一起位移 / 缩放 / 旋转，保持和照片上的真实位置对齐。
+  if (placementPoints.value.length) {
+    const oldCenter = { x: CANVAS_WIDTH / 2 + before.x, y: 480 + before.y }
+    const newCenter = { x: CANVAS_WIDTH / 2 + next.x, y: 480 + next.y }
+    const scaleRatio = next.scale / before.scale
+    const direction = earSide.value === 'left' ? -1 : 1
+    const angle = (next.rotation - before.rotation) * direction * Math.PI / 180
+    const cosine = Math.cos(angle)
+    const sine = Math.sin(angle)
+    for (const point of placementPoints.value) {
+      const relativeX = (point.x - oldCenter.x) * scaleRatio
+      const relativeY = (point.y - oldCenter.y) * scaleRatio
+      point.x = newCenter.x + relativeX * cosine - relativeY * sine
+      point.y = newCenter.y + relativeX * sine + relativeY * cosine
+    }
+  }
+
+  Object.assign(earTransform, next)
+}
+
+function resetEar() {
+  updateEar({ x: 0, y: 0, scale: 1, rotation: 0 })
+}
+
+// 切换左右耳时照片会镜像，标记点必须一起镜像才不会脱离耳朵。
+watch(earSide, () => {
+  if (!placementPoints.value.length) return
+  placementPoints.value = mirrorPointsAcross(placementPoints.value, CANVAS_WIDTH / 2 + earTransform.x)
+})
+
+function enterMode(mode) {
+  if (mode === 'occlusion' && !selectedPiece.value) return
+  editorMode.value = mode
+  if (mode === 'ear' || mode === 'piercings') selectedId.value = null
+}
+
+function finishMode() {
+  editorMode.value = 'stack'
+}
+
+function nudgeScale(amount) {
+  if (!selectedPiece.value) return
+  selectedPiece.value.scale = Math.max(0.22, Math.min(2.8, selectedPiece.value.scale + amount))
+}
+
+function nudgeRotation(amount) {
+  if (!selectedPiece.value) return
+  selectedPiece.value.rotation = (selectedPiece.value.rotation + amount + 360) % 360
+}
+
+function deleteSelected() {
+  if (!selectedId.value) return
+  pieces.value = pieces.value.filter((piece) => piece.id !== selectedId.value)
+  selectedId.value = null
+  normalizeZIndexes()
+  finishMode()
+}
+
+function defaultPosition(type) {
+  if (type === 'CUFF') return { x: 492, y: 390 }
+  if (type === 'CHAIN') return { x: 438, y: 555 }
+  if (type === 'HOOP') return { x: 438, y: 650 }
+  return { x: 430, y: 610 }
+}
+
+function addPiece(item) {
+  sequence.value += 1
+  const id = `piece-${String(sequence.value).padStart(3, '0')}`
+  const position = defaultPosition(item.type)
+  pieces.value.push({
+    id,
+    catalogId: item.id,
+    source: item.source,
+    nameZh: item.zh,
+    nameEn: item.en,
+    x: position.x + (sequence.value % 3) * 18,
+    y: position.y + (sequence.value % 2) * 18,
+    scale: item.scale,
+    rotation: 0,
+    zIndex: pieces.value.length + 1,
+    type: item.type,
+    size: item.size,
+    mask: { strokes: [] },
+  })
+  selectedId.value = id
+}
+
+function cloneMask(mask) {
+  return {
+    strokes: (mask?.strokes || []).map((stroke) => ({
+      mode: stroke.mode,
+      size: stroke.size,
+      points: [...stroke.points],
+    })),
+  }
+}
+
+function duplicateSelected() {
+  if (!selectedPiece.value) return
+  sequence.value += 1
+  const id = `piece-${String(sequence.value).padStart(3, '0')}`
+  pieces.value.push({
+    ...selectedPiece.value,
+    id,
+    x: selectedPiece.value.x + 28,
+    y: selectedPiece.value.y + 28,
+    zIndex: pieces.value.length + 1,
+    mask: cloneMask(selectedPiece.value.mask),
+  })
+  selectedId.value = id
+}
+
+function bringForward() {
+  const index = selectedIndex.value
+  if (index < 0 || index >= pieces.value.length - 1) return
+  const next = pieces.value[index + 1]
+  pieces.value[index + 1] = pieces.value[index]
+  pieces.value[index] = next
+  normalizeZIndexes()
+}
+
+function sendBackward() {
+  const index = selectedIndex.value
+  if (index <= 0) return
+  const previous = pieces.value[index - 1]
+  pieces.value[index - 1] = pieces.value[index]
+  pieces.value[index] = previous
+  normalizeZIndexes()
+}
+
+// 完全由用户点击产生，不做任何自动识别。
+function addPlacementPoint(position) {
+  placementSequence.value += 1
+  const point = createPlacementPoint({
+    x: position.x,
+    y: position.y,
+    index: placementSequence.value,
+    status: newPlacementStatus.value,
+    region: newPlacementRegion.value,
+    points: placementPoints.value,
+  })
+  placementPoints.value.push(point)
+  selectedPlacementId.value = point.id
+}
+
+function updatePlacementPoint(id, patch) {
+  const point = placementPoints.value.find((entry) => entry.id === id)
+  if (point) Object.assign(point, patch)
+}
+
+function deleteSelectedPlacementPoint() {
+  if (!selectedPlacementId.value) return
+  placementPoints.value = placementPoints.value.filter((point) => point.id !== selectedPlacementId.value)
+  selectedPlacementId.value = placementPoints.value.at(-1)?.id || null
+}
+
+function updateMask(id, strokes) {
+  const piece = pieces.value.find((entry) => entry.id === id)
+  if (piece) piece.mask = { strokes }
+}
+
+function undoMask() {
+  if (!selectedPiece.value || !currentMaskCount.value) return
+  updateMask(selectedPiece.value.id, selectedPiece.value.mask.strokes.slice(0, -1))
+}
+
+function resetMask() {
+  if (!selectedPiece.value) return
+  updateMask(selectedPiece.value.id, [])
+}
+
+function openEarPicker() {
+  earUploadError.value = ''
+  if (!earInput.value) return
+  earInput.value.value = ''
+  earInput.value.click()
+}
+
+function handleEarUpload(event) {
+  const file = event.target.files?.[0]
+  if (!file) return
+  if (!file.type.startsWith('image/')) {
+    earUploadError.value = '请选择图片文件。'
+    return
+  }
+  const nextUrl = URL.createObjectURL(file)
+  if (uploadedEarUrl) URL.revokeObjectURL(uploadedEarUrl)
+  uploadedEarUrl = nextUrl
+  earSource.value = nextUrl
+  hasCustomEar.value = true
+  earUploadError.value = ''
+  placementPoints.value = []
+  selectedPlacementId.value = null
+  placementSequence.value = 0
+  resetEar()
+  enterMode('ear')
+}
+
+onBeforeUnmount(() => {
+  if (uploadedEarUrl) URL.revokeObjectURL(uploadedEarUrl)
+})
+</script>
+
+<template>
+  <main class="editor-page">
+    <WindowChrome :title="`${brand.name}.EXE — 搭配编辑器 / UNTITLED_001`">
+      <nav class="menu-strip editor-menu" aria-label="编辑器菜单">
+        <RouterLink to="/">文件</RouterLink>
+        <span>编辑</span><span>视图</span><span>搭配</span><span>饰品</span><span>档案</span><span>帮助</span>
+      </nav>
+
+      <header class="editor-toolbar">
+        <div class="editor-file">
+          <p class="eyebrow">搭配编辑器 <small>STACK EDITOR</small></p>
+          <strong>UNTITLED_001</strong>
+        </div>
+
+        <div class="mode-switch" aria-label="编辑模式">
+          <button :class="{ active: editorMode === 'ear' }" @click="enterMode('ear')"><b>调整耳朵</b><small>ADJUST EAR</small></button>
+          <button :class="{ active: editorMode === 'piercings' }" @click="enterMode('piercings')"><b>标记耳洞</b><small>MARK PIERCINGS</small></button>
+          <button :class="{ active: editorMode === 'stack' }" @click="enterMode('stack')"><b>编辑搭配</b><small>EDIT STACK</small></button>
+          <button :class="{ active: editorMode === 'occlusion' }" :disabled="!selectedPiece" @click="enterMode('occlusion')"><b>遮挡修正</b><small>OCCLUSION</small></button>
+        </div>
+
+        <div class="ear-switch" aria-label="选择耳朵方向">
+          <button :class="{ active: earSide === 'left' }" @click="earSide = 'left'"><b>左耳</b><small>LEFT</small></button>
+          <button :class="{ active: earSide === 'right' }" @click="earSide = 'right'"><b>右耳</b><small>RIGHT</small></button>
+        </div>
+
+        <div class="ear-upload">
+          <input ref="earInput" class="visually-hidden" type="file" accept="image/*" @change="handleEarUpload" />
+          <button class="ear-upload__button" type="button" @click="openEarPicker">
+            <b>{{ hasCustomEar ? '更换耳朵照片' : '上传耳朵照片' }}</b>
+            <small>{{ hasCustomEar ? 'REPLACE EAR' : 'UPLOAD EAR' }}</small>
+          </button>
+          <span v-if="earUploadError" role="alert">{{ earUploadError }}</span>
+        </div>
+      </header>
+
+      <div class="editor-workspace">
+        <aside class="archive-panel panel-surface" :class="{ 'panel-surface--inactive': editorMode !== 'stack' }">
+          <div class="panel-heading">
+            <span><b>饰品库</b><small>JEWELRY ARCHIVE</small></span>
+            <small>{{ jewelryArchive.length }} 件</small>
+          </div>
+          <div class="archive-filters" aria-label="饰品分类">
+            <button
+              v-for="category in jewelryCategories"
+              :key="category.value"
+              :class="{ active: activeCategory === category.value }"
+              :disabled="editorMode !== 'stack'"
+              @click="activeCategory = category.value"
+            ><b>{{ category.zh }}</b><small>{{ category.en }}</small></button>
+          </div>
+          <div class="archive-list">
+            <button
+              v-for="item in filteredJewelry"
+              :key="item.id"
+              class="archive-piece"
+              type="button"
+              :disabled="editorMode !== 'stack'"
+              :aria-label="`添加${item.zh}`"
+              @click="addPiece(item)"
+            >
+              <span class="archive-thumb"><img :src="item.source" :alt="item.zh" /></span>
+              <span class="archive-piece__name"><b>{{ item.zh }}</b><small>{{ item.en }} · {{ item.type }}</small></span>
+              <i aria-hidden="true">＋</i>
+            </button>
+          </div>
+        </aside>
+
+        <section class="canvas-panel">
+          <EarCanvas
+            :ear-source="earSource"
+            :ear-side="earSide"
+            :ear-transform="earTransform"
+            :mode="editorMode"
+            :pieces="pieces"
+            :selected-id="selectedId"
+            :placement-points="placementPoints"
+            :selected-placement-id="selectedPlacementId"
+            :snap-enabled="snapEnabled"
+            :brush-mode="brushMode"
+            :brush-size="brushSize"
+            @select="selectedId = $event"
+            @update-piece="updatePiece"
+            @update-ear="updateEar"
+            @add-placement-point="addPlacementPoint"
+            @select-placement-point="selectedPlacementId = $event"
+            @update-placement-point="updatePlacementPoint"
+            @update-mask="updateMask"
+          />
+        </section>
+
+        <aside v-if="editorMode === 'ear'" class="details-panel ear-adjust-panel panel-surface">
+          <div class="panel-heading"><span><b>调整耳朵</b><small>ADJUST EAR</small></span><small>背景层</small></div>
+          <p class="adjust-note">拖动照片改变位置；手机可双指缩放和旋转。</p>
+          <div class="piece-readout">
+            <span>横向<b>{{ Math.round(earTransform.x) }}</b></span>
+            <span>缩放<b>{{ earTransform.scale.toFixed(2) }}</b></span>
+            <span>角度<b>{{ Math.round(earTransform.rotation) }}°</b></span>
+          </div>
+          <div class="touch-controls">
+            <div><small>缩放</small><button aria-label="缩小耳朵照片" @click="updateEar({ scale: earTransform.scale - 0.1 })">−</button><button aria-label="放大耳朵照片" @click="updateEar({ scale: earTransform.scale + 0.1 })">＋</button></div>
+            <div><small>旋转</small><button aria-label="向左旋转耳朵照片" @click="updateEar({ rotation: earTransform.rotation - 2 })">↶</button><button aria-label="向右旋转耳朵照片" @click="updateEar({ rotation: earTransform.rotation + 2 })">↷</button></div>
+          </div>
+          <div class="adjust-actions">
+            <button type="button" @click="resetEar"><b>重置</b><small>RESET</small></button>
+            <button class="done-button" type="button" @click="finishMode"><b>完成</b><small>DONE</small></button>
+          </div>
+        </aside>
+
+        <aside v-else-if="editorMode === 'piercings'" class="details-panel piercing-panel panel-surface">
+          <div class="panel-heading"><span><b>标记耳洞</b><small>MARK PIERCINGS</small></span><small>{{ placementPoints.length }} 个</small></div>
+          <p class="adjust-note">系统不会自动识别耳洞。先选状态和部位，再轻点照片上你自己的真实耳洞位置。</p>
+
+          <div class="piercing-status-picker" aria-label="新标记状态">
+            <button :class="{ active: newPlacementStatus === 'existing' }" @click="newPlacementStatus = 'existing'"><i></i><b>已有耳洞</b><small>EXISTING</small></button>
+            <button :class="{ active: newPlacementStatus === 'planned' }" @click="newPlacementStatus = 'planned'"><i></i><b>计划穿刺</b><small>PLANNED</small></button>
+          </div>
+
+          <div class="placement-region">
+            <small>部位标签 <b>REGION</b></small>
+            <div class="placement-region-picker" aria-label="部位标签">
+              <button
+                v-for="region in PLACEMENT_REGIONS"
+                :key="region"
+                :class="{ active: newPlacementRegion === region }"
+                @click="newPlacementRegion = region"
+              >{{ region }}</button>
+            </div>
+          </div>
+
+          <div class="placement-legend" aria-label="标记图例">
+            <span><i class="legend-dot"></i>实心 · 已有 EXISTING</span>
+            <span><i class="legend-dot legend-dot--planned"></i>空心 · 计划 PLANNED</span>
+          </div>
+
+          <div class="piercing-list" aria-label="已标记位置">
+            <button
+              v-for="point in placementPoints"
+              :key="point.id"
+              :class="{ active: selectedPlacementId === point.id, planned: isPlanned(point) }"
+              @click="selectedPlacementId = point.id"
+            >
+              <i></i>
+              <b>{{ point.label }}</b>
+              <small>{{ point.id }} · {{ PLACEMENT_STATUS_LABEL[point.status].zh }}</small>
+            </button>
+            <p v-if="!placementPoints.length">还没有标记。轻点画布即可添加 P01。</p>
+          </div>
+
+          <div v-if="selectedPlacement" class="piercing-editor">
+            <label>标记名称 <small>LABEL</small><input v-model.trim="selectedPlacement.label" maxlength="18" /></label>
+            <div class="piercing-status-picker piercing-status-picker--compact">
+              <button :class="{ active: selectedPlacement.status === 'existing' }" @click="selectedPlacement.status = 'existing'"><b>已有</b><small>EXISTING</small></button>
+              <button :class="{ active: selectedPlacement.status === 'planned' }" @click="selectedPlacement.status = 'planned'"><b>计划</b><small>PLANNED</small></button>
+            </div>
+            <p class="piercing-tip">标记只作为定位参考，不会限制饰品自由移动。拖动已选中的标记可以直接微调位置。</p>
+            <button class="delete-mark-button" @click="deleteSelectedPlacementPoint"><b>删除标记</b><small>DELETE MARK</small></button>
+          </div>
+
+          <div class="adjust-actions piercing-done">
+            <button class="done-button" type="button" @click="finishMode"><b>完成</b><small>DONE</small></button>
+          </div>
+        </aside>
+
+        <aside v-else-if="editorMode === 'occlusion'" class="details-panel occlusion-panel panel-surface">
+          <div class="panel-heading"><span><b>遮挡修正</b><small>OCCLUSION</small></span><small>{{ selectedPiece?.nameZh }}</small></div>
+          <p class="adjust-note">用手指涂抹耳饰。隐藏后会露出下方耳朵照片，原始素材不会被修改。</p>
+          <div class="mask-mode-switch" aria-label="遮挡画笔模式">
+            <button :class="{ active: brushMode === 'hide' }" @click="brushMode = 'hide'"><b>隐藏</b><small>HIDE</small></button>
+            <button :class="{ active: brushMode === 'restore' }" @click="brushMode = 'restore'"><b>恢复</b><small>RESTORE</small></button>
+          </div>
+          <label class="brush-size-control">
+            <span><b>画笔大小</b><small>BRUSH SIZE</small></span>
+            <input v-model.number="brushSize" type="range" min="8" max="72" step="2" />
+            <output>{{ brushSize }}</output>
+          </label>
+          <div class="mask-actions">
+            <button :disabled="!currentMaskCount" @click="undoMask"><b>撤销</b><small>UNDO</small></button>
+            <button :disabled="!currentMaskCount" @click="resetMask"><b>重置遮挡</b><small>RESET MASK</small></button>
+            <button class="done-button" @click="finishMode"><b>完成</b><small>DONE</small></button>
+          </div>
+        </aside>
+
+        <aside v-else class="details-panel panel-surface" :class="{ 'details-panel--empty': !selectedPiece }">
+          <div class="panel-heading"><span><b>饰品详情</b><small>PIECE DETAILS</small></span><small>{{ selectedPiece ? selectedPiece.id.toUpperCase() : '未选择' }}</small></div>
+          <template v-if="selectedPiece">
+            <div class="selected-piece-name"><b>{{ selectedPiece.nameZh }}</b><small>{{ selectedPiece.nameEn }}</small></div>
+            <div class="piece-readout">
+              <span>类型<b>{{ selectedPiece.type }}</b></span>
+              <span>大小<b>{{ selectedPiece.scale.toFixed(2) }}</b></span>
+              <span>角度<b>{{ Math.round(selectedPiece.rotation) }}°</b></span>
+            </div>
+            <button class="snap-toggle" :class="{ active: snapEnabled }" type="button" @click="snapEnabled = !snapEnabled"><b>吸附自定义耳洞 {{ snapEnabled ? '开' : '关' }}</b><small>SNAP TO OWN MARKS · {{ placementPoints.length }}</small></button>
+            <div class="touch-controls">
+              <div><small>大小</small><button aria-label="缩小饰品" @click="nudgeScale(-0.1)">−</button><button aria-label="放大饰品" @click="nudgeScale(0.1)">＋</button></div>
+              <div><small>旋转</small><button aria-label="向左旋转饰品" @click="nudgeRotation(-15)">↶</button><button aria-label="向右旋转饰品" @click="nudgeRotation(15)">↷</button></div>
+            </div>
+            <button class="occlusion-entry" type="button" @click="enterMode('occlusion')"><b>遮挡修正</b><small>OCCLUSION · {{ currentMaskCount }} STROKES</small></button>
+            <div class="layer-actions">
+              <button type="button" @click="duplicateSelected"><b>复制</b><small>DUPLICATE</small></button>
+              <button type="button" :disabled="selectedIndex >= pieces.length - 1" @click="bringForward"><b>上移一层</b><small>BRING FORWARD</small></button>
+              <button type="button" :disabled="selectedIndex <= 0" @click="sendBackward"><b>下移一层</b><small>SEND BACKWARD</small></button>
+            </div>
+            <button class="delete-button" type="button" @click="deleteSelected"><b>删除饰品</b><small>DELETE PIECE</small></button>
+          </template>
+          <template v-else>
+            <p class="empty-selection">点击一件饰品开始编辑。<small>TAP A PIECE TO EDIT</small></p>
+            <button class="snap-toggle snap-toggle--empty" :class="{ active: snapEnabled }" type="button" @click="snapEnabled = !snapEnabled"><b>吸附自定义耳洞 {{ snapEnabled ? '开' : '关' }}</b><small>SNAP TO OWN MARKS · {{ placementPoints.length }}</small></button>
+          </template>
+        </aside>
+      </div>
+
+      <div class="editor-status status-strip">
+        <span>{{ pieces.length }} 件饰品 · {{ placementPoints.length }} 个标记点</span>
+        <span>{{ modeStatus }}</span>
+        <span>本地模式</span>
+      </div>
+    </WindowChrome>
+  </main>
+</template>
