@@ -1,4 +1,4 @@
 export const brand = {
-  name: 'LIMINAL',
+  name: '4EVER',
   subtitle: 'Piercing & Jewelry Editor',
 }

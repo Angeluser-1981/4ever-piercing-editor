@@ -3,3 +3,6 @@ dist/
 .DS_Store
 *.local
 .sites-runtime/
+
+# WorkBuddy 工作目录（会话 memory / 临时文件），不入版本库
+.workbuddy/

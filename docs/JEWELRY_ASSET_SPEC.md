@@ -1,4 +1,4 @@
-# LIMINAL · 试戴素材规范 / JEWELRY ASSET SPEC
+# 4EVER · 试戴素材规范 / JEWELRY ASSET SPEC
 
 适用范围：`src/assets/jewelry/` 下所有饰品素材，以及任何后续生成的素材。
 

@@ -6,7 +6,7 @@ import WindowChrome from '../components/common/WindowChrome.vue'
 <template>
   <main class="home-shell">
     <div class="home-haze" aria-hidden="true"></div>
-    <WindowChrome title="LIMINAL.EXE — 私人档案 / PRIVATE ARCHIVE">
+    <WindowChrome title="4EVER.EXE — 私人档案 / PRIVATE ARCHIVE">
       <div class="menu-strip" aria-hidden="true">文件&nbsp;&nbsp; 编辑&nbsp;&nbsp; 视图&nbsp;&nbsp; 搭配&nbsp;&nbsp; 饰品&nbsp;&nbsp; 档案&nbsp;&nbsp; 帮助</div>
       <div class="home-window">
         <div class="sigil" aria-hidden="true">

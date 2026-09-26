@@ -1,4 +1,4 @@
-// LIMINAL · 穿刺点数据模型 / PLACEMENT POINT MODEL
+// 4EVER · 穿刺点数据模型 / PLACEMENT POINT MODEL
 //
 // 当前版本只使用耳朵。未来的唇钉 / 眉钉 / 鼻钉只需要扩展 bodyPart，
 // 不需要改动编辑器逻辑，也不需要引入系统预设耳位。
