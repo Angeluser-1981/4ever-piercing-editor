@@ -1,5 +1,5 @@
 <script setup>
-import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from 'vue'
+import { computed, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import { loadBrowserImage, preprocessJewelryImage } from '../../services/image.js'
 import { renderOccludedJewelry } from '../../services/occlusion.js'
 import { CANVAS_HEIGHT as BASE_HEIGHT, CANVAS_WIDTH as BASE_WIDTH } from '../../config/canvas.js'
@@ -31,8 +31,8 @@ const emit = defineEmits([
 // 只有真正需要穿过耳洞固定的饰品参与吸附：耳骨夹是夹在耳朵上的，不吸附。
 const SNAP_TYPES = ['STUD', 'HOOP', 'CHAIN']
 const host = ref(null)
-const transformer = ref(null)
 const backgroundRef = ref(null)
+const selectionOutlineRef = ref(null)
 const shapeRefs = new Map()
 const maskedCanvases = new Map()
 const width = ref(360)
@@ -41,13 +41,12 @@ const pieceImages = ref({})
 const maskedPieceImages = ref({})
 const pieceHitBounds = ref({})
 const coarsePointer = ref(false)
-const isDraggingPiece = ref(false)
 const snapGuide = ref(null)
 const brushCursor = ref(null)
 let resizeObserver
 let earLoadToken = 0
 let gesture = null
-let gestureWasUsed = false
+let suppressTapUntil = 0
 let lastTap = null
 let lastPointTap = null
 let activeMaskStroke = null
@@ -89,33 +88,35 @@ const backgroundConfig = computed(() => {
   }
 })
 
-const transformerConfig = computed(() => {
-  const compactControls = coarsePointer.value || width.value < 460
-  const anchorSize = compactControls ? 20 : 14
+const selectionOutline = computed(() => {
+  const piece = selectedPiece.value
+  if (!isEditingStack.value || !piece) return null
+  const bounds = pieceHitBounds.value[piece.source] || { x: 0, y: 0, width: 1, height: 1 }
+  const padding = piece.size * 0.045
   return {
-    visible: isEditingStack.value && Boolean(props.selectedId) && !isDraggingPiece.value,
-    rotateEnabled: true,
-    resizeEnabled: true,
-    keepRatio: true,
-    flipEnabled: false,
-    centeredScaling: false,
-    enabledAnchors: compactControls ? ['bottom-right'] : ['top-left', 'top-right', 'bottom-left', 'bottom-right'],
-    anchorSize,
-    anchorCornerRadius: anchorSize / 2,
-    anchorStroke: 'rgba(228,241,248,.78)',
-    anchorStrokeWidth: 0.8,
-    anchorFill: 'rgba(51,62,70,.34)',
-    borderStroke: 'rgba(229,241,248,.42)',
-    borderStrokeWidth: 1,
-    borderDash: [4, 5],
-    padding: 3,
-    rotateAnchorOffset: compactControls ? 30 : 26,
-    rotateLineVisible: false,
-    rotateAnchorCursor: 'grab',
-    boundBoxFunc: (oldBox, newBox) => {
-      const minimum = (coarsePointer.value ? 42 : 28) / viewportScale.value
-      if (Math.abs(newBox.width) < minimum || Math.abs(newBox.height) < minimum) return oldBox
-      return newBox
+    piece,
+    group: {
+      x: piece.x,
+      y: piece.y,
+      offsetX: piece.size / 2,
+      offsetY: piece.size / 2,
+      scaleX: piece.scale,
+      scaleY: piece.scale,
+      rotation: piece.rotation,
+      listening: false,
+    },
+    rect: {
+      x: bounds.x * piece.size - padding,
+      y: bounds.y * piece.size - padding,
+      width: bounds.width * piece.size + padding * 2,
+      height: bounds.height * piece.size + padding * 2,
+      stroke: 'rgba(211, 207, 195, .58)',
+      strokeWidth: 1,
+      dash: [4, 4],
+      fillEnabled: false,
+      strokeScaleEnabled: false,
+      perfectDrawEnabled: false,
+      listening: false,
     },
   }
 })
@@ -125,21 +126,13 @@ function setShapeRef(node, id) {
   else shapeRefs.delete(id)
 }
 
-function attachTransformer() {
-  nextTick(() => {
-    const transformerNode = transformer.value?.getNode()
-    const shapeComponent = shapeRefs.get(props.selectedId)
-    const shapeNode = isEditingStack.value && shapeComponent?.getNode?.()
-    transformerNode?.nodes(shapeNode ? [shapeNode] : [])
-    transformerNode?.getLayer()?.batchDraw()
-  })
-}
-
-function clearSelection(event) {
-  if (isEditingStack.value && event.target === event.target.getStage()) {
-    snapGuide.value = null
-    emit('select', null)
-  }
+function syncSelectionOutline(node, piece) {
+  if (piece.id !== props.selectedId) return
+  const outline = selectionOutlineRef.value?.getNode?.()
+  if (!outline) return
+  outline.position({ x: node.x(), y: node.y() })
+  outline.scale({ x: node.scaleX(), y: node.scaleY() })
+  outline.rotation(node.rotation())
 }
 
 function alphaBounds(image) {
@@ -182,13 +175,18 @@ function alphaBounds(image) {
 function pieceHitFunc(piece) {
   return (context, shape) => {
     const bounds = pieceHitBounds.value[piece.source] || { x: 0, y: 0, width: 1, height: 1 }
-    const padding = Math.min(piece.size * 0.11, (coarsePointer.value ? 13 : 7) / viewportScale.value / Math.max(piece.scale, 0.18))
-    const x = Math.max(0, bounds.x * piece.size - padding)
-    const y = Math.max(0, bounds.y * piece.size - padding)
-    const right = Math.min(piece.size, (bounds.x + bounds.width) * piece.size + padding)
-    const bottom = Math.min(piece.size, (bounds.y + bounds.height) * piece.size + padding)
+    const scale = viewportScale.value * Math.max(piece.scale, 0.18)
+    const selected = piece.id === props.selectedId
+    const minimumSize = (selected ? 56 : 46) / scale
+    const padding = (coarsePointer.value ? 10 : 6) / scale
+    const visibleWidth = bounds.width * piece.size
+    const visibleHeight = bounds.height * piece.size
+    const hitWidth = Math.max(minimumSize, visibleWidth + padding * 2)
+    const hitHeight = Math.max(minimumSize, visibleHeight + padding * 2)
+    const centerX = (bounds.x + bounds.width / 2) * piece.size
+    const centerY = (bounds.y + bounds.height / 2) * piece.size
     context.beginPath()
-    context.rect(x, y, right - x, bottom - y)
+    context.rect(centerX - hitWidth / 2, centerY - hitHeight / 2, hitWidth, hitHeight)
     context.closePath()
     context.fillStrokeShape(shape)
   }
@@ -222,7 +220,7 @@ function pieceConfig(piece) {
     opacity: pieceOpacity(piece),
     name: 'jewelry-piece',
     pieceId: piece.id,
-    dragDistance: coarsePointer.value ? 4 : 2,
+    dragDistance: coarsePointer.value ? 0 : 1,
     hitFunc: pieceHitFunc(piece),
     perfectDrawEnabled: false,
   }
@@ -277,7 +275,6 @@ function updatePieceFromNode(event, piece) {
 function beginPieceDrag(event, piece) {
   if (!isEditingStack.value || gesture) return
   event.evt?.preventDefault?.()
-  isDraggingPiece.value = true
   snapGuide.value = null
   emit('select', piece.id)
 }
@@ -315,31 +312,19 @@ function movePiece(event, piece) {
   const node = event.target
   const snapped = magneticPosition(node.x(), node.y(), piece)
   node.position({ x: snapped.x, y: snapped.y })
-  snapGuide.value = snapped.target
-  transformer.value?.getNode()?.getLayer()?.batchDraw()
+  syncSelectionOutline(node, piece)
+  if (snapGuide.value?.id !== snapped.target?.id) snapGuide.value = snapped.target
 }
 
 function endPieceDrag(event, piece) {
   if (gesture) return
   event.evt?.preventDefault?.()
-  isDraggingPiece.value = false
   updatePieceFromNode(event, piece)
   snapGuide.value = null
-  attachTransformer()
-}
-
-function transformPiece(event) {
-  const node = event.target
-  const scale = Math.max(0.18, Math.min(2.8, node.scaleX()))
-  node.scale({ x: scale, y: scale })
-  transformer.value?.getNode()?.forceUpdate()
 }
 
 function handlePieceTap(event, id) {
-  if (!isEditingStack.value || gestureWasUsed) {
-    gestureWasUsed = false
-    return
-  }
+  if (!isEditingStack.value || performance.now() < suppressTapUntil) return
   if (event.type === 'click' && lastTap?.eventType === 'tap' && performance.now() - lastTap.time < 450) return
   event.cancelBubble = true
   const stage = syncPointer(event)
@@ -362,6 +347,11 @@ function handlePieceTap(event, id) {
 }
 
 function handleStageTap(event) {
+  if (isEditingStack.value) {
+    if (performance.now() < suppressTapUntil) return
+    if (event.target === event.target.getStage()) emit('select', null)
+    return
+  }
   if (!isMarkingPiercings.value) return
   if (event.target?.getAttr?.('placementId')) return
   const now = performance.now()
@@ -432,17 +422,19 @@ function beginEarGesture(touches) {
   }
 }
 
-function beginPieceGesture(event, touches) {
-  const eventPieceId = event.target?.getAttr?.('pieceId')
-  const pieceId = eventPieceId || props.selectedId
+function beginPieceGesture(touches) {
+  const pieceId = props.selectedId
   const piece = props.pieces.find((entry) => entry.id === pieceId)
   const node = shapeRefs.get(pieceId)?.getNode?.()
   if (!piece || !node) return
-  node.stopDrag()
-  node.draggable(false)
-  isDraggingPiece.value = true
-  snapGuide.value = null
-  emit('select', pieceId)
+
+  for (const entry of props.pieces) {
+    const entryNode = shapeRefs.get(entry.id)?.getNode?.()
+    if (!entryNode) continue
+    entryNode.stopDrag()
+    if (entry.id !== pieceId) entryNode.position({ x: entry.x, y: entry.y })
+  }
+
   gesture = {
     mode: 'piece',
     node,
@@ -453,6 +445,9 @@ function beginPieceGesture(event, touches) {
     scale: node.scaleX(),
     rotation: node.rotation(),
   }
+  node.stopDrag()
+  node.draggable(false)
+  snapGuide.value = null
 }
 
 /**
@@ -551,7 +546,6 @@ function finishMaskStroke(event) {
 
 function handlePointerDown(event) {
   if (isOccluding.value) beginMaskStroke(event)
-  else clearSelection(event)
 }
 
 function handlePointerMove(event) {
@@ -560,19 +554,16 @@ function handlePointerMove(event) {
 
 function handleTouchStart(event) {
   const touches = event.evt.touches
+  if (touches.length) event.evt.preventDefault()
   if (isOccluding.value) {
     if (touches.length === 1) beginMaskStroke(event)
     return
   }
   if (isMarkingPiercings.value) return
-  if (touches.length !== 2) {
-    if (isEditingStack.value) clearSelection(event)
-    return
-  }
-  event.evt.preventDefault()
-  gestureWasUsed = true
+  if (touches.length !== 2) return
+  suppressTapUntil = performance.now() + 350
   if (isAdjustingEar.value) beginEarGesture(touches)
-  else if (isEditingStack.value) beginPieceGesture(event, touches)
+  else if (isEditingStack.value) beginPieceGesture(touches)
 }
 
 function handleTouchMove(event) {
@@ -582,7 +573,7 @@ function handleTouchMove(event) {
   }
   if (!gesture || event.evt.touches.length !== 2) return
   event.evt.preventDefault()
-  gestureWasUsed = true
+  suppressTapUntil = performance.now() + 350
   const metrics = touchMetrics(event.evt.touches)
   const x = gesture.x + (metrics.centerX - gesture.centerX) / viewportScale.value
   const y = gesture.y + (metrics.centerY - gesture.centerY) / viewportScale.value
@@ -603,6 +594,7 @@ function handleTouchMove(event) {
   gesture.node.position({ x, y })
   gesture.node.scale({ x: scale, y: scale })
   gesture.node.rotation(rotation)
+  syncSelectionOutline(gesture.node, gesture.piece)
   gesture.node.getLayer()?.batchDraw()
 }
 
@@ -614,6 +606,7 @@ function handleTouchEnd(event) {
   if (!gesture || event.evt.touches.length >= 2) return
   const completedGesture = gesture
   gesture = null
+  suppressTapUntil = performance.now() + 350
   if (completedGesture.mode === 'ear') {
     completedGesture.node.draggable(isAdjustingEar.value)
     return
@@ -621,6 +614,7 @@ function handleTouchEnd(event) {
 
   const snapped = magneticPosition(completedGesture.node.x(), completedGesture.node.y(), completedGesture.piece)
   completedGesture.node.position({ x: snapped.x, y: snapped.y })
+  syncSelectionOutline(completedGesture.node, completedGesture.piece)
   completedGesture.node.draggable(true)
   emit('update-piece', completedGesture.piece.id, {
     x: snapped.x,
@@ -628,9 +622,7 @@ function handleTouchEnd(event) {
     scale: completedGesture.node.scaleX(),
     rotation: completedGesture.node.rotation(),
   })
-  isDraggingPiece.value = false
   snapGuide.value = null
-  attachTransformer()
 }
 
 async function loadEarSource(source) {
@@ -656,7 +648,6 @@ onMounted(async () => {
     width.value = Math.round(Math.max(280, Math.min(BASE_WIDTH, entry.contentRect.width)))
   })
   resizeObserver.observe(host.value)
-  attachTransformer()
 })
 
 watch(() => props.earSource, loadEarSource, { immediate: true })
@@ -666,14 +657,12 @@ watch([() => props.selectedId, () => props.mode], () => {
     brushCursor.value = null
     redrawAllMasks()
   }
-  attachTransformer()
 })
 watch(
   () => props.pieces.map((piece) => ({ id: piece.id, source: piece.source, mask: piece.mask?.strokes || [] })),
   async () => {
     await loadPieceImages()
     redrawAllMasks()
-    attachTransformer()
   },
   { deep: true },
 )
@@ -747,12 +736,13 @@ onBeforeUnmount(() => resizeObserver?.disconnect())
           @dragstart="beginPieceDrag($event, piece)"
           @dragmove="movePiece($event, piece)"
           @dragend="endPieceDrag($event, piece)"
-          @transform="transformPiece"
-          @transformend="updatePieceFromNode($event, piece)"
         />
 
+        <v-group v-if="selectionOutline" ref="selectionOutlineRef" :config="selectionOutline.group">
+          <v-rect :config="selectionOutline.rect" />
+        </v-group>
+
         <v-circle v-if="brushCursor" :config="{ x: brushCursor.x, y: brushCursor.y, radius: brushCursor.radius, stroke: brushMode === 'hide' ? 'rgba(242,205,220,.95)' : 'rgba(205,237,246,.95)', strokeWidth: 2, dash: brushMode === 'restore' ? [5, 4] : [], fill: 'rgba(255,255,255,.04)', listening: false }" />
-        <v-transformer ref="transformer" :config="transformerConfig" />
       </v-layer>
     </v-stage>
     <div class="canvas-label canvas-label--top">耳朵画布 <small>EAR CANVAS</small></div>

@@ -282,7 +282,7 @@ button:focus-visible, a:focus-visible { outline: 2px solid #1f4e74; outline-offs
 .editor-toolbar {
   min-height: 61px;
   display: grid;
-  grid-template-columns: minmax(160px, 1fr) auto auto auto;
+  grid-template-columns: minmax(150px, 1fr) auto auto auto auto;
   align-items: center;
   gap: 16px;
   padding: 8px 12px;
@@ -291,6 +291,22 @@ button:focus-visible, a:focus-visible { outline: 2px solid #1f4e74; outline-offs
 }
 .editor-toolbar strong { display: block; margin-top: 2px; font-family: Georgia, serif; font-size: 1rem; font-weight: 400; letter-spacing: .06em; }
 .editor-toolbar small { font-size: .56rem; letter-spacing: .08em; }
+.history-controls { display: flex; gap: 4px; }
+.history-controls button {
+  min-width: 58px;
+  min-height: 40px;
+  padding: 3px 8px;
+  color: #3b454d;
+  background: #e5e8ea;
+  border: 1px solid #7d848a;
+  box-shadow: inset 1px 1px #fff, inset -1px -1px #aeb3b7;
+}
+.history-controls button b,
+.history-controls button small { display: block; white-space: nowrap; }
+.history-controls button b { font-size: .66rem; }
+.history-controls button small { margin-top: 2px; color: #737b82; font-size: .48rem; }
+.history-controls button:disabled { cursor: default; opacity: .38; }
+.history-controls button:not(:disabled):active { transform: translate(1px, 1px); box-shadow: inset 1px 1px #92999e; }
 .autosave-note { justify-self: end; color: #687078; font-size: .69rem; }
 .mode-switch { display: flex; padding: 3px; border: 1px solid #94999e; background: #c8cccf; box-shadow: inset 1px 1px #878d92; }
 .ear-switch { display: flex; padding: 3px; border: 1px solid #94999e; background: #c8cccf; box-shadow: inset 1px 1px #878d92; }
@@ -431,6 +447,7 @@ button:focus-visible, a:focus-visible { outline: 2px solid #1f4e74; outline-offs
 .archive-hint { margin: 12px; color: #6d747b; font-size: .69rem; line-height: 1.5; }
 
 .canvas-panel {
+  position: relative;
   min-width: 0;
   display: grid;
   place-items: center;
@@ -449,6 +466,8 @@ button:focus-visible, a:focus-visible { outline: 2px solid #1f4e74; outline-offs
   touch-action: none;
   overscroll-behavior: contain;
   user-select: none;
+  -webkit-user-select: none;
+  -webkit-touch-callout: none;
 }
 .canvas-host--adjusting { cursor: move; box-shadow: 0 0 0 2px #afc5d5, 12px 14px 34px rgba(0,0,0,.28); }
 .canvas-host--marking { cursor: crosshair; box-shadow: 0 0 0 2px #b6cbd8, 12px 14px 34px rgba(0,0,0,.28); }
@@ -456,7 +475,63 @@ button:focus-visible, a:focus-visible { outline: 2px solid #1f4e74; outline-offs
 .canvas-host canvas {
   display: block;
   image-rendering: auto;
+  touch-action: none;
 }
+.quick-add-popover {
+  position: absolute;
+  left: 50%;
+  bottom: 24px;
+  z-index: 12;
+  width: min(520px, calc(100% - 32px));
+  max-height: min(350px, calc(100% - 40px));
+  overflow: auto;
+  transform: translateX(-50%);
+  color: #30373d;
+  background: rgba(232, 235, 237, .97);
+  border: 1px solid #606970;
+  box-shadow: inset 1px 1px #fff, 8px 10px 24px rgba(8, 13, 17, .32);
+}
+.quick-add-popover__heading {
+  position: sticky;
+  top: 0;
+  z-index: 1;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  min-height: 44px;
+  padding: 6px 8px 6px 11px;
+  background: #d4d9dc;
+  border-bottom: 1px solid #969da2;
+}
+.quick-add-popover__heading span b,
+.quick-add-popover__heading span small { display: block; }
+.quick-add-popover__heading span b { font-size: .75rem; }
+.quick-add-popover__heading span small { margin-top: 2px; color: #6b747a; font-size: .52rem; letter-spacing: .07em; }
+.quick-add-popover__heading > button { width: 34px; height: 34px; flex: 0 0 auto; background: #e8eaeb; border: 1px solid #858c91; font-size: 1.2rem; }
+.quick-add-list {
+  display: grid;
+  grid-template-columns: repeat(5, minmax(76px, 1fr));
+  gap: 5px;
+  padding: 8px;
+}
+.quick-add-list > button {
+  min-height: 92px;
+  display: grid;
+  grid-template-rows: 54px auto auto;
+  place-items: center;
+  gap: 2px;
+  padding: 5px;
+  background: #eef0f1;
+  border: 1px solid #92999e;
+  box-shadow: inset 1px 1px #fff;
+}
+.quick-add-list > button:active { background: #d6dce0; }
+.quick-add-list > button span { width: 52px; height: 52px; display: grid; place-items: center; }
+.quick-add-list > button img { width: 100%; height: 100%; object-fit: contain; }
+.quick-add-list > button b { font-size: .63rem; }
+.quick-add-list > button small { color: #747c82; font-size: .48rem; }
+.quick-add-popover > p { margin: 0; padding: 0 10px 9px; color: #687178; font-size: .6rem; line-height: 1.45; }
 .canvas-label {
   position: absolute;
   pointer-events: none;
@@ -696,13 +771,16 @@ button:focus-visible, a:focus-visible { outline: 2px solid #1f4e74; outline-offs
   .editor-page > .window { border-left: 0; border-right: 0; box-shadow: none; }
   .editor-menu { display: none; }
   .editor-toolbar {
-    grid-template-columns: minmax(108px, 1fr) auto;
+    grid-template-columns: minmax(88px, 1fr) auto auto;
     grid-template-rows: auto auto auto;
     min-height: 152px;
   }
   .autosave-note { display: none; }
   .editor-file { grid-column: 1; grid-row: 1; }
-  .ear-switch { grid-column: 2; grid-row: 1; }
+  .history-controls { grid-column: 2; grid-row: 1; }
+  .history-controls button { min-width: 48px; min-height: 38px; padding-inline: 5px; }
+  .history-controls button b { font-size: .6rem; }
+  .ear-switch { grid-column: 3; grid-row: 1; }
   .mode-switch { grid-column: 1 / -1; grid-row: 2; }
   .mode-switch { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); width: 100%; }
   .mode-switch button { min-width: 0; min-height: 48px; padding-inline: 3px; }
@@ -714,6 +792,9 @@ button:focus-visible, a:focus-visible { outline: 2px solid #1f4e74; outline-offs
   .ear-switch button { min-height: 38px; padding-inline: 10px; }
   .editor-workspace { display: flex; flex-direction: column; height: auto; min-height: 0; }
   .canvas-panel { order: 1; padding: 8px; min-height: 0; }
+  .quick-add-popover { position: fixed; left: 8px; right: 8px; bottom: max(8px, env(safe-area-inset-bottom)); width: auto; max-height: min(56svh, 430px); transform: none; }
+  .quick-add-list { grid-template-columns: repeat(5, minmax(62px, 1fr)); overflow-x: auto; }
+  .quick-add-list > button { min-width: 72px; min-height: 88px; }
   .canvas-host { width: min(100%, calc((100svh - 390px) * .75)); min-width: 280px; }
   .details-panel { order: 2; }
   .archive-panel { order: 3; }

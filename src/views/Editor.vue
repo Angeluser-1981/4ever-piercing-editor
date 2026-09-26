@@ -1,5 +1,5 @@
 <script setup>
-import { computed, onBeforeUnmount, reactive, ref, watch } from 'vue'
+import { computed, onBeforeUnmount, onMounted, reactive, ref, watch } from 'vue'
 import { brand } from '../config/brand.js'
 import { CANVAS_WIDTH } from '../config/canvas.js'
 import { jewelryArchive, jewelryCategories } from '../data/jewelry.js'
@@ -25,6 +25,10 @@ const newPlacementRegion = ref(PLACEMENT_REGIONS[0])
 const snapEnabled = ref(true)
 const brushMode = ref('hide')
 const brushSize = ref(28)
+const quickAddPlacementId = ref(null)
+const undoStack = ref([])
+const redoStack = ref([])
+const HISTORY_LIMIT = 80
 let uploadedEarUrl = null
 
 const earTransform = reactive({ x: 0, y: 0, scale: 1, rotation: 0 })
@@ -50,10 +54,13 @@ const pieces = ref([
 const selectedPiece = computed(() => pieces.value.find((piece) => piece.id === selectedId.value))
 const selectedIndex = computed(() => pieces.value.findIndex((piece) => piece.id === selectedId.value))
 const selectedPlacement = computed(() => placementPoints.value.find((point) => point.id === selectedPlacementId.value))
+const quickAddPlacement = computed(() => placementPoints.value.find((point) => point.id === quickAddPlacementId.value))
 const filteredJewelry = computed(() => activeCategory.value === 'ALL'
   ? jewelryArchive
   : jewelryArchive.filter((item) => item.type === activeCategory.value))
 const currentMaskCount = computed(() => selectedPiece.value?.mask?.strokes?.length || 0)
+const canUndo = computed(() => undoStack.value.length > 0)
+const canRedo = computed(() => redoStack.value.length > 0)
 const modeStatus = computed(() => {
   if (editorMode.value === 'ear') return '正在调整耳朵 / ADJUST EAR'
   if (editorMode.value === 'piercings') return '正在标记耳洞 / MARK PIERCINGS'
@@ -65,9 +72,65 @@ function normalizeZIndexes() {
   pieces.value.forEach((piece, index) => { piece.zIndex = index + 1 })
 }
 
+function clonePiece(piece) {
+  return { ...piece, mask: cloneMask(piece.mask) }
+}
+
+function snapshotEditor() {
+  return {
+    pieces: pieces.value.map(clonePiece),
+    placementPoints: placementPoints.value.map((point) => ({ ...point })),
+    selectedId: selectedId.value,
+    selectedPlacementId: selectedPlacementId.value,
+    sequence: sequence.value,
+    placementSequence: placementSequence.value,
+  }
+}
+
+function restoreEditor(snapshot) {
+  pieces.value = snapshot.pieces.map(clonePiece)
+  placementPoints.value = snapshot.placementPoints.map((point) => ({ ...point }))
+  sequence.value = snapshot.sequence
+  placementSequence.value = snapshot.placementSequence
+  selectedId.value = pieces.value.some((piece) => piece.id === snapshot.selectedId) ? snapshot.selectedId : null
+  selectedPlacementId.value = placementPoints.value.some((point) => point.id === snapshot.selectedPlacementId)
+    ? snapshot.selectedPlacementId
+    : null
+  quickAddPlacementId.value = null
+  if (editorMode.value === 'occlusion' && !selectedId.value) editorMode.value = 'stack'
+}
+
+function pushHistory(snapshot = snapshotEditor()) {
+  undoStack.value = [...undoStack.value.slice(-(HISTORY_LIMIT - 1)), snapshot]
+  redoStack.value = []
+}
+
+function clearHistory() {
+  undoStack.value = []
+  redoStack.value = []
+}
+
+function undoEditor() {
+  if (!canUndo.value) return
+  const previous = undoStack.value.at(-1)
+  redoStack.value = [...redoStack.value.slice(-(HISTORY_LIMIT - 1)), snapshotEditor()]
+  undoStack.value = undoStack.value.slice(0, -1)
+  restoreEditor(previous)
+}
+
+function redoEditor() {
+  if (!canRedo.value) return
+  const next = redoStack.value.at(-1)
+  undoStack.value = [...undoStack.value.slice(-(HISTORY_LIMIT - 1)), snapshotEditor()]
+  redoStack.value = redoStack.value.slice(0, -1)
+  restoreEditor(next)
+}
+
 function updatePiece(id, patch) {
   const piece = pieces.value.find((entry) => entry.id === id)
-  if (piece) Object.assign(piece, patch)
+  if (!piece || !Object.entries(patch).some(([key, value]) => piece[key] !== value)) return
+  pushHistory()
+  Object.assign(piece, patch)
 }
 
 function updateEar(patch) {
@@ -96,7 +159,9 @@ function updateEar(patch) {
     }
   }
 
+  const changed = Object.keys(next).some((key) => next[key] !== before[key])
   Object.assign(earTransform, next)
+  if (changed) clearHistory()
 }
 
 function resetEar() {
@@ -105,13 +170,16 @@ function resetEar() {
 
 // 切换左右耳时照片会镜像，标记点必须一起镜像才不会脱离耳朵。
 watch(earSide, () => {
-  if (!placementPoints.value.length) return
-  placementPoints.value = mirrorPointsAcross(placementPoints.value, CANVAS_WIDTH / 2 + earTransform.x)
+  if (placementPoints.value.length) {
+    placementPoints.value = mirrorPointsAcross(placementPoints.value, CANVAS_WIDTH / 2 + earTransform.x)
+  }
+  clearHistory()
 })
 
 function enterMode(mode) {
   if (mode === 'occlusion' && !selectedPiece.value) return
   editorMode.value = mode
+  quickAddPlacementId.value = null
   if (mode === 'ear' || mode === 'piercings') selectedId.value = null
 }
 
@@ -121,16 +189,19 @@ function finishMode() {
 
 function nudgeScale(amount) {
   if (!selectedPiece.value) return
+  pushHistory()
   selectedPiece.value.scale = Math.max(0.22, Math.min(2.8, selectedPiece.value.scale + amount))
 }
 
 function nudgeRotation(amount) {
   if (!selectedPiece.value) return
+  pushHistory()
   selectedPiece.value.rotation = (selectedPiece.value.rotation + amount + 360) % 360
 }
 
 function deleteSelected() {
   if (!selectedId.value) return
+  pushHistory()
   pieces.value = pieces.value.filter((piece) => piece.id !== selectedId.value)
   selectedId.value = null
   normalizeZIndexes()
@@ -145,6 +216,7 @@ function defaultPosition(type) {
 }
 
 function addPiece(item) {
+  pushHistory()
   sequence.value += 1
   const id = `piece-${String(sequence.value).padStart(3, '0')}`
   const position = defaultPosition(item.type)
@@ -166,6 +238,41 @@ function addPiece(item) {
   selectedId.value = id
 }
 
+function addPieceAtPlacement(item) {
+  const point = quickAddPlacement.value
+  if (!point) return
+  pushHistory()
+  sequence.value += 1
+  const id = `piece-${String(sequence.value).padStart(3, '0')}`
+  pieces.value.push({
+    id,
+    catalogId: item.id,
+    source: item.source,
+    nameZh: item.zh,
+    nameEn: item.en,
+    x: point.x,
+    y: point.y,
+    scale: item.scale,
+    rotation: 0,
+    zIndex: pieces.value.length + 1,
+    type: item.type,
+    size: item.size,
+    mask: { strokes: [] },
+  })
+  selectedId.value = id
+  quickAddPlacementId.value = null
+}
+
+function selectPiece(id) {
+  selectedId.value = id
+  quickAddPlacementId.value = null
+}
+
+function selectPlacementPoint(id) {
+  selectedPlacementId.value = id
+  if (editorMode.value === 'stack') quickAddPlacementId.value = id
+}
+
 function cloneMask(mask) {
   return {
     strokes: (mask?.strokes || []).map((stroke) => ({
@@ -178,6 +285,7 @@ function cloneMask(mask) {
 
 function duplicateSelected() {
   if (!selectedPiece.value) return
+  pushHistory()
   sequence.value += 1
   const id = `piece-${String(sequence.value).padStart(3, '0')}`
   pieces.value.push({
@@ -194,6 +302,7 @@ function duplicateSelected() {
 function bringForward() {
   const index = selectedIndex.value
   if (index < 0 || index >= pieces.value.length - 1) return
+  pushHistory()
   const next = pieces.value[index + 1]
   pieces.value[index + 1] = pieces.value[index]
   pieces.value[index] = next
@@ -203,6 +312,7 @@ function bringForward() {
 function sendBackward() {
   const index = selectedIndex.value
   if (index <= 0) return
+  pushHistory()
   const previous = pieces.value[index - 1]
   pieces.value[index - 1] = pieces.value[index]
   pieces.value[index] = previous
@@ -211,6 +321,7 @@ function sendBackward() {
 
 // 完全由用户点击产生，不做任何自动识别。
 function addPlacementPoint(position) {
+  pushHistory()
   placementSequence.value += 1
   const point = createPlacementPoint({
     x: position.x,
@@ -226,18 +337,29 @@ function addPlacementPoint(position) {
 
 function updatePlacementPoint(id, patch) {
   const point = placementPoints.value.find((entry) => entry.id === id)
-  if (point) Object.assign(point, patch)
+  if (!point || !Object.entries(patch).some(([key, value]) => point[key] !== value)) return
+  pushHistory()
+  Object.assign(point, patch)
 }
 
 function deleteSelectedPlacementPoint() {
   if (!selectedPlacementId.value) return
+  pushHistory()
   placementPoints.value = placementPoints.value.filter((point) => point.id !== selectedPlacementId.value)
   selectedPlacementId.value = placementPoints.value.at(-1)?.id || null
 }
 
 function updateMask(id, strokes) {
   const piece = pieces.value.find((entry) => entry.id === id)
-  if (piece) piece.mask = { strokes }
+  if (!piece) return
+  pushHistory()
+  piece.mask = { strokes }
+}
+
+function setSelectedPlacementStatus(status) {
+  if (!selectedPlacement.value || selectedPlacement.value.status === status) return
+  pushHistory()
+  selectedPlacement.value.status = status
 }
 
 function undoMask() {
@@ -273,11 +395,32 @@ function handleEarUpload(event) {
   placementPoints.value = []
   selectedPlacementId.value = null
   placementSequence.value = 0
+  clearHistory()
   resetEar()
   enterMode('ear')
 }
 
+function handleHistoryShortcut(event) {
+  if (!(event.ctrlKey || event.metaKey) || event.altKey) return
+  const target = event.target
+  if (target instanceof HTMLElement && (target.isContentEditable || /^(INPUT|TEXTAREA|SELECT)$/.test(target.tagName))) return
+  const key = event.key.toLowerCase()
+  if (key === 'z' && event.shiftKey) {
+    event.preventDefault()
+    redoEditor()
+  } else if (key === 'z') {
+    event.preventDefault()
+    undoEditor()
+  } else if (key === 'y') {
+    event.preventDefault()
+    redoEditor()
+  }
+}
+
+onMounted(() => window.addEventListener('keydown', handleHistoryShortcut))
+
 onBeforeUnmount(() => {
+  window.removeEventListener('keydown', handleHistoryShortcut)
   if (uploadedEarUrl) URL.revokeObjectURL(uploadedEarUrl)
 })
 </script>
@@ -294,6 +437,11 @@ onBeforeUnmount(() => {
         <div class="editor-file">
           <p class="eyebrow">搭配编辑器 <small>STACK EDITOR</small></p>
           <strong>UNTITLED_001</strong>
+        </div>
+
+        <div class="history-controls" aria-label="编辑历史">
+          <button type="button" :disabled="!canUndo" title="Ctrl+Z" @click="undoEditor"><b>↶ 撤销</b><small>UNDO</small></button>
+          <button type="button" :disabled="!canRedo" title="Ctrl+Y / Ctrl+Shift+Z" @click="redoEditor"><b>↷ 重做</b><small>REDO</small></button>
         </div>
 
         <div class="mode-switch" aria-label="编辑模式">
@@ -363,14 +511,35 @@ onBeforeUnmount(() => {
             :snap-enabled="snapEnabled"
             :brush-mode="brushMode"
             :brush-size="brushSize"
-            @select="selectedId = $event"
+            @select="selectPiece"
             @update-piece="updatePiece"
             @update-ear="updateEar"
             @add-placement-point="addPlacementPoint"
-            @select-placement-point="selectedPlacementId = $event"
+            @select-placement-point="selectPlacementPoint"
             @update-placement-point="updatePlacementPoint"
             @update-mask="updateMask"
           />
+
+          <div v-if="quickAddPlacement" class="quick-add-popover" role="dialog" aria-modal="false" :aria-label="`在${quickAddPlacement.label}添加饰品`">
+            <div class="quick-add-popover__heading">
+              <span><b>添加饰品</b><small>ADD TO {{ quickAddPlacement.label }} · {{ PLACEMENT_STATUS_LABEL[quickAddPlacement.status].zh }}</small></span>
+              <button type="button" aria-label="关闭添加饰品" @click="quickAddPlacementId = null">×</button>
+            </div>
+            <div class="quick-add-list">
+              <button
+                v-for="item in jewelryArchive"
+                :key="item.id"
+                type="button"
+                :aria-label="`将${item.zh}放到${quickAddPlacement.label}`"
+                @click="addPieceAtPlacement(item)"
+              >
+                <span><img :src="item.source" :alt="item.zh" /></span>
+                <b>{{ item.zh }}</b>
+                <small>{{ item.type }}</small>
+              </button>
+            </div>
+            <p>放置后不会绑定耳洞点，仍可自由拖动、缩放和旋转。</p>
+          </div>
         </section>
 
         <aside v-if="editorMode === 'ear'" class="details-panel ear-adjust-panel panel-surface">
@@ -434,8 +603,8 @@ onBeforeUnmount(() => {
           <div v-if="selectedPlacement" class="piercing-editor">
             <label>标记名称 <small>LABEL</small><input v-model.trim="selectedPlacement.label" maxlength="18" /></label>
             <div class="piercing-status-picker piercing-status-picker--compact">
-              <button :class="{ active: selectedPlacement.status === 'existing' }" @click="selectedPlacement.status = 'existing'"><b>已有</b><small>EXISTING</small></button>
-              <button :class="{ active: selectedPlacement.status === 'planned' }" @click="selectedPlacement.status = 'planned'"><b>计划</b><small>PLANNED</small></button>
+              <button :class="{ active: selectedPlacement.status === 'existing' }" @click="setSelectedPlacementStatus('existing')"><b>已有</b><small>EXISTING</small></button>
+              <button :class="{ active: selectedPlacement.status === 'planned' }" @click="setSelectedPlacementStatus('planned')"><b>计划</b><small>PLANNED</small></button>
             </div>
             <p class="piercing-tip">标记只作为定位参考，不会限制饰品自由移动。拖动已选中的标记可以直接微调位置。</p>
             <button class="delete-mark-button" @click="deleteSelectedPlacementPoint"><b>删除标记</b><small>DELETE MARK</small></button>
