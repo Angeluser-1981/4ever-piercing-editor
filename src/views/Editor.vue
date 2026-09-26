@@ -1,16 +1,23 @@
 <script setup>
 import { computed, onBeforeUnmount, onMounted, reactive, ref, watch } from 'vue'
+import { useRoute, useRouter } from 'vue-router'
 import { brand } from '../config/brand.js'
 import { CANVAS_WIDTH } from '../config/canvas.js'
 import { jewelryArchive, jewelryCategories } from '../data/jewelry.js'
 import { PLACEMENT_REGIONS, PLACEMENT_STATUS, PLACEMENT_STATUS_LABEL, createPlacementPoint, isPlanned, mirrorPointsAcross } from '../data/placement.js'
 import WindowChrome from '../components/common/WindowChrome.vue'
 import EarCanvas from '../components/editor/EarCanvas.vue'
+import { createStackId, getStack, nextStackName, putStack, sourceToBlob } from '../services/stackArchive.js'
 import demoEarSource from '../assets/images/test-ear-sharp.png'
+
+const route = useRoute()
+const router = useRouter()
 
 const earSide = ref('right')
 const earSource = ref(demoEarSource)
 const earInput = ref(null)
+const canvasRef = ref(null)
+const earImageName = ref('test-ear-sharp.png')
 const hasCustomEar = ref(false)
 const earUploadError = ref('')
 const editorMode = ref('stack')
@@ -28,8 +35,17 @@ const brushSize = ref(28)
 const quickAddPlacementId = ref(null)
 const undoStack = ref([])
 const redoStack = ref([])
+const currentStackId = ref(null)
+const currentStackName = ref('')
+const currentStackCreatedAt = ref(null)
+const archiveNotice = ref('')
+const isSaving = ref(false)
+const isExporting = ref(false)
 const HISTORY_LIMIT = 80
 let uploadedEarUrl = null
+let suppressNextEarMirror = false
+let noticeTimer = null
+const restoredJewelryUrls = new Set()
 
 const earTransform = reactive({ x: 0, y: 0, scale: 1, rotation: 0 })
 const firstJewelry = jewelryArchive[0]
@@ -61,6 +77,7 @@ const filteredJewelry = computed(() => activeCategory.value === 'ALL'
 const currentMaskCount = computed(() => selectedPiece.value?.mask?.strokes?.length || 0)
 const canUndo = computed(() => undoStack.value.length > 0)
 const canRedo = computed(() => redoStack.value.length > 0)
+const stackDisplayName = computed(() => currentStackName.value || 'UNTITLED_001')
 const modeStatus = computed(() => {
   if (editorMode.value === 'ear') return '正在调整耳朵 / ADJUST EAR'
   if (editorMode.value === 'piercings') return '正在标记耳洞 / MARK PIERCINGS'
@@ -170,6 +187,10 @@ function resetEar() {
 
 // 切换左右耳时照片会镜像，标记点必须一起镜像才不会脱离耳朵。
 watch(earSide, () => {
+  if (suppressNextEarMirror) {
+    suppressNextEarMirror = false
+    return
+  }
   if (placementPoints.value.length) {
     placementPoints.value = mirrorPointsAcross(placementPoints.value, CANVAS_WIDTH / 2 + earTransform.x)
   }
@@ -390,6 +411,7 @@ function handleEarUpload(event) {
   if (uploadedEarUrl) URL.revokeObjectURL(uploadedEarUrl)
   uploadedEarUrl = nextUrl
   earSource.value = nextUrl
+  earImageName.value = file.name
   hasCustomEar.value = true
   earUploadError.value = ''
   placementPoints.value = []
@@ -398,6 +420,166 @@ function handleEarUpload(event) {
   clearHistory()
   resetEar()
   enterMode('ear')
+}
+
+function showArchiveNotice(message) {
+  archiveNotice.value = message
+  if (noticeTimer) window.clearTimeout(noticeTimer)
+  noticeTimer = window.setTimeout(() => { archiveNotice.value = '' }, 2800)
+}
+
+function releaseRestoredJewelryUrls() {
+  for (const url of restoredJewelryUrls) URL.revokeObjectURL(url)
+  restoredJewelryUrls.clear()
+}
+
+async function serializeJewelryLayer(piece) {
+  const catalogItem = jewelryArchive.find((item) => item.id === piece.catalogId)
+  const customSource = !catalogItem || catalogItem.source !== piece.source
+  return {
+    id: piece.id,
+    catalogId: piece.catalogId || null,
+    source: piece.source,
+    sourceBlob: customSource ? await sourceToBlob(piece.source) : null,
+    nameZh: piece.nameZh,
+    nameEn: piece.nameEn,
+    type: piece.type,
+    size: piece.size,
+    x: piece.x,
+    y: piece.y,
+    scale: piece.scale,
+    rotation: piece.rotation,
+    zIndex: piece.zIndex,
+    mask: cloneMask(piece.mask),
+  }
+}
+
+async function saveCurrentStack() {
+  if (isSaving.value || !canvasRef.value) return
+  isSaving.value = true
+  archiveNotice.value = '正在写入本机档案… / SAVING'
+  try {
+    const now = new Date().toISOString()
+    const id = currentStackId.value || createStackId()
+    const name = currentStackName.value || await nextStackName()
+    const [earBlob, jewelryLayers, thumbnailBlob] = await Promise.all([
+      sourceToBlob(earSource.value),
+      Promise.all(pieces.value.map(serializeJewelryLayer)),
+      canvasRef.value.createThumbnailBlob(),
+    ])
+    const record = {
+      schemaVersion: 1,
+      id,
+      name,
+      createdAt: currentStackCreatedAt.value || now,
+      updatedAt: now,
+      ear: {
+        side: earSide.value,
+        image: {
+          blob: earBlob,
+          fileName: earImageName.value,
+          mimeType: earBlob.type || 'image/png',
+          custom: hasCustomEar.value,
+        },
+        transform: { ...earTransform },
+      },
+      placementPoints: placementPoints.value.map((point) => ({ ...point })),
+      jewelryLayers,
+      editor: {
+        sequence: sequence.value,
+        placementSequence: placementSequence.value,
+        snapEnabled: snapEnabled.value,
+      },
+      thumbnailBlob,
+    }
+    await putStack(record)
+    currentStackId.value = id
+    currentStackName.value = name
+    currentStackCreatedAt.value = record.createdAt
+    await router.replace({ name: 'editor', query: { ...route.query, stack: id } })
+    showArchiveNotice(`${name} 已保存到本机 / ARCHIVED`)
+  } catch (error) {
+    showArchiveNotice(`保存失败 / ${error?.message || 'SAVE FAILED'}`)
+  } finally {
+    isSaving.value = false
+  }
+}
+
+async function exportImage() {
+  if (isExporting.value || !canvasRef.value) return
+  isExporting.value = true
+  archiveNotice.value = '正在生成高清 PNG… / EXPORTING'
+  try {
+    const blob = await canvasRef.value.createExportBlob()
+    const url = URL.createObjectURL(blob)
+    const link = document.createElement('a')
+    const safeName = (currentStackName.value || '4EVER_STACK').replace(/[^\w\-]+/g, '_')
+    link.href = url
+    link.download = `${safeName}.png`
+    document.body.appendChild(link)
+    link.click()
+    link.remove()
+    window.setTimeout(() => URL.revokeObjectURL(url), 1200)
+    showArchiveNotice('PNG 已导出 / EXPORT COMPLETE')
+  } catch (error) {
+    showArchiveNotice(`导出失败 / ${error?.message || 'EXPORT FAILED'}`)
+  } finally {
+    isExporting.value = false
+  }
+}
+
+async function restoreSavedStack(record) {
+  if (!record) return
+  if (uploadedEarUrl) URL.revokeObjectURL(uploadedEarUrl)
+  releaseRestoredJewelryUrls()
+
+  const earBlob = record.ear?.image?.blob
+  uploadedEarUrl = earBlob ? URL.createObjectURL(earBlob) : null
+  earSource.value = uploadedEarUrl || demoEarSource
+  earImageName.value = record.ear?.image?.fileName || 'ear-photo.png'
+  hasCustomEar.value = Boolean(record.ear?.image?.custom)
+  Object.assign(earTransform, { x: 0, y: 0, scale: 1, rotation: 0 }, record.ear?.transform || {})
+
+  const restoredSide = record.ear?.side === 'left' ? 'left' : 'right'
+  if (restoredSide !== earSide.value) suppressNextEarMirror = true
+  earSide.value = restoredSide
+  placementPoints.value = (record.placementPoints || []).map((point) => ({ ...point }))
+
+  pieces.value = (await Promise.all((record.jewelryLayers || []).map(async (layer) => {
+    const catalogItem = jewelryArchive.find((item) => item.id === layer.catalogId)
+    let source = catalogItem?.source || layer.source
+    if (layer.sourceBlob) {
+      source = URL.createObjectURL(layer.sourceBlob)
+      restoredJewelryUrls.add(source)
+    }
+    return { ...layer, source, mask: cloneMask(layer.mask) }
+  }))).sort((a, b) => a.zIndex - b.zIndex)
+
+  sequence.value = record.editor?.sequence || pieces.value.length
+  placementSequence.value = record.editor?.placementSequence || placementPoints.value.length
+  snapEnabled.value = record.editor?.snapEnabled ?? true
+  selectedId.value = null
+  selectedPlacementId.value = null
+  quickAddPlacementId.value = null
+  editorMode.value = 'stack'
+  currentStackId.value = record.id
+  currentStackName.value = record.name
+  currentStackCreatedAt.value = record.createdAt
+  clearHistory()
+}
+
+async function loadSavedStack(id) {
+  try {
+    const record = await getStack(id)
+    if (!record) {
+      showArchiveNotice('未找到这份本机档案 / FILE NOT FOUND')
+      return
+    }
+    await restoreSavedStack(record)
+    showArchiveNotice(`${record.name} 已恢复 / FILE OPENED`)
+  } catch (error) {
+    showArchiveNotice(`读取失败 / ${error?.message || 'OPEN FAILED'}`)
+  }
 }
 
 function handleHistoryShortcut(event) {
@@ -417,26 +599,31 @@ function handleHistoryShortcut(event) {
   }
 }
 
-onMounted(() => window.addEventListener('keydown', handleHistoryShortcut))
+onMounted(async () => {
+  window.addEventListener('keydown', handleHistoryShortcut)
+  if (typeof route.query.stack === 'string') await loadSavedStack(route.query.stack)
+})
 
 onBeforeUnmount(() => {
   window.removeEventListener('keydown', handleHistoryShortcut)
+  if (noticeTimer) window.clearTimeout(noticeTimer)
   if (uploadedEarUrl) URL.revokeObjectURL(uploadedEarUrl)
+  releaseRestoredJewelryUrls()
 })
 </script>
 
 <template>
   <main class="editor-page">
-    <WindowChrome :title="`${brand.name}.EXE — 搭配编辑器 / UNTITLED_001`">
+    <WindowChrome :title="`${brand.name}.EXE — 搭配编辑器 / ${stackDisplayName}`">
       <nav class="menu-strip editor-menu" aria-label="编辑器菜单">
         <RouterLink to="/">文件</RouterLink>
-        <span>编辑</span><span>视图</span><span>搭配</span><span>饰品</span><span>档案</span><span>帮助</span>
+        <span>编辑</span><span>视图</span><span>搭配</span><span>饰品</span><RouterLink to="/memory">档案</RouterLink><span>帮助</span>
       </nav>
 
       <header class="editor-toolbar">
         <div class="editor-file">
           <p class="eyebrow">搭配编辑器 <small>STACK EDITOR</small></p>
-          <strong>UNTITLED_001</strong>
+          <strong>{{ stackDisplayName }}</strong>
         </div>
 
         <div class="history-controls" aria-label="编辑历史">
@@ -465,6 +652,13 @@ onBeforeUnmount(() => {
           <span v-if="earUploadError" role="alert">{{ earUploadError }}</span>
         </div>
       </header>
+
+      <div class="stack-file-bar" aria-label="搭配文件操作">
+        <button type="button" :disabled="isSaving" @click="saveCurrentStack"><b>保存搭配</b><small>ARCHIVE THIS STACK</small></button>
+        <button type="button" :disabled="isExporting" @click="exportImage"><b>导出图片</b><small>EXPORT IMAGE · PNG</small></button>
+        <RouterLink to="/memory"><b>搭配档案</b><small>MEMORY FILES</small></RouterLink>
+        <span class="stack-file-bar__notice" aria-live="polite">{{ archiveNotice || '工程与图片分别保存 / LOCAL ONLY' }}</span>
+      </div>
 
       <div class="editor-workspace">
         <aside class="archive-panel panel-surface" :class="{ 'panel-surface--inactive': editorMode !== 'stack' }">
@@ -500,6 +694,7 @@ onBeforeUnmount(() => {
 
         <section class="canvas-panel">
           <EarCanvas
+            ref="canvasRef"
             :ear-source="earSource"
             :ear-side="earSide"
             :ear-transform="earTransform"

@@ -640,6 +640,65 @@ async function loadPieceImages() {
   }
 }
 
+function canvasToBlob(canvas, type = 'image/png', quality) {
+  return new Promise((resolve, reject) => {
+    canvas.toBlob((blob) => {
+      if (blob) resolve(blob)
+      else reject(new Error('无法生成图片文件。'))
+    }, type, quality)
+  })
+}
+
+async function renderCleanCanvas(pixelRatio = 2) {
+  await loadEarSource(props.earSource)
+  await loadPieceImages()
+  redrawAllMasks()
+
+  const ratio = Math.max(0.25, Math.min(3, pixelRatio))
+  const canvas = document.createElement('canvas')
+  canvas.width = Math.round(BASE_WIDTH * ratio)
+  canvas.height = Math.round(BASE_HEIGHT * ratio)
+  const context = canvas.getContext('2d')
+  context.setTransform(ratio, 0, 0, ratio, 0, 0)
+  context.imageSmoothingEnabled = true
+  context.imageSmoothingQuality = 'high'
+
+  const background = earImage.value
+  if (background) {
+    const fit = Math.max(BASE_WIDTH / background.width, BASE_HEIGHT / background.height)
+    const mirrored = props.earSide === 'left'
+    const imageScale = fit * props.earTransform.scale
+    context.save()
+    context.translate(BASE_WIDTH / 2 + props.earTransform.x, BASE_HEIGHT / 2 + props.earTransform.y)
+    context.rotate((mirrored ? -props.earTransform.rotation : props.earTransform.rotation) * Math.PI / 180)
+    context.scale(mirrored ? -imageScale : imageScale, imageScale)
+    context.drawImage(background, -background.width / 2, -background.height / 2)
+    context.restore()
+  }
+
+  for (const piece of props.pieces) {
+    const image = displayImageFor(piece)
+    if (!image) continue
+    context.save()
+    context.translate(piece.x, piece.y)
+    context.rotate(piece.rotation * Math.PI / 180)
+    context.scale(piece.scale, piece.scale)
+    context.drawImage(image, -piece.size / 2, -piece.size / 2, piece.size, piece.size)
+    context.restore()
+  }
+  return canvas
+}
+
+async function createExportBlob() {
+  return canvasToBlob(await renderCleanCanvas(2), 'image/png')
+}
+
+async function createThumbnailBlob() {
+  return canvasToBlob(await renderCleanCanvas(0.4), 'image/png')
+}
+
+defineExpose({ createExportBlob, createThumbnailBlob })
+
 onMounted(async () => {
   coarsePointer.value = window.matchMedia('(pointer: coarse)').matches
   await loadPieceImages()

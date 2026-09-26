@@ -1,6 +1,7 @@
 import { createRouter, createWebHashHistory } from 'vue-router'
 import Home from './views/Home.vue'
 import Editor from './views/Editor.vue'
+import MemoryFiles from './views/MemoryFiles.vue'
 
 export default createRouter({
   history: createWebHashHistory(),
@@ -8,5 +9,6 @@ export default createRouter({
   routes: [
     { path: '/', name: 'home', component: Home },
     { path: '/editor', name: 'editor', component: Editor },
+    { path: '/memory', name: 'memory', component: MemoryFiles },
   ],
 })

@@ -29,7 +29,7 @@ import WindowChrome from '../components/common/WindowChrome.vue'
 
         <div class="home-index" aria-label="Future sections">
           <button type="button" disabled><span>02</span><b>穿刺地图<small>BODY MAP</small></b><i>未开放</i></button>
-          <button type="button" disabled><span>03</span><b>搭配档案<small>MEMORY FILES</small></b><i>暂无</i></button>
+          <RouterLink to="/memory"><span>03</span><b>搭配档案<small>MEMORY FILES</small></b><i>打开 →</i></RouterLink>
         </div>
       </div>
       <div class="status-strip">
